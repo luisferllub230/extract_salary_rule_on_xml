@@ -52,9 +52,78 @@ def get_payroll_structures(models, db, uid, password):
         return {}
 
 
+def get_rule_parameters(models, db, uid, password):
+    """Fetch all rule parameters (hr.rule.parameter)."""
+    try:
+        params = models.execute_kw(
+            db, uid, password,
+            'hr.rule.parameter', 'search_read',
+            [[]],
+            {'fields': ['id', 'name', 'code', 'description', 'country_id']}
+        )
+        return params
+    except Exception as e:
+        print(f"Warning: Could not fetch rule parameters: {e}")
+        return []
+
+
+def get_rule_parameter_values(models, db, uid, password, parameter_ids=None):
+    """Fetch all rule parameter values (hr.rule.parameter.value)."""
+    try:
+        domain = []
+        if parameter_ids:
+            domain = [('rule_parameter_id', 'in', parameter_ids)]
+
+        values = models.execute_kw(
+            db, uid, password,
+            'hr.rule.parameter.value', 'search_read',
+            [domain],
+            {'fields': ['id', 'rule_parameter_id', 'date_from', 'parameter_value'],
+             'order': 'rule_parameter_id, date_from'}
+        )
+        return values
+    except Exception as e:
+        print(f"Warning: Could not fetch rule parameter values: {e}")
+        return []
+
+
+def get_salary_rule_inputs(models, db, uid, password, rule_ids=None):
+    """Fetch salary rule inputs."""
+    # En Odoo, los inputs pueden estar en diferentes modelos según la versión
+    # Intentamos con hr.payslip.input.type o hr.salary.rule.input
+    inputs = []
+
+    # Primero intentamos obtener los tipos de input
+    try:
+        input_types = models.execute_kw(
+            db, uid, password,
+            'hr.payslip.input.type', 'search_read',
+            [[]],
+            {'fields': ['id', 'name', 'code', 'struct_ids', 'country_id']}
+        )
+        inputs = input_types
+    except Exception as e:
+        print(f"Note: hr.payslip.input.type not available: {e}")
+
+        # Intentar con modelo alternativo
+        try:
+            input_types = models.execute_kw(
+                db, uid, password,
+                'hr.salary.rule.input', 'search_read',
+                [[]],
+                {'fields': ['id', 'name', 'code', 'input_id']}
+            )
+            inputs = input_types
+        except Exception as e2:
+            print(f"Note: hr.salary.rule.input not available: {e2}")
+
+    return inputs
+
+
 def get_salary_rules(models, db, uid, password, structure_id=None):
     """Fetch salary rules with ALL available fields."""
     # Lista de campos validados para Odoo 18 hr.salary.rule
+    # Nota: struct_id es many2one (una sola estructura por regla)
     fields = [
         'id', 'name', 'code', 'sequence', 'category_id',
         'condition_select', 'condition_python', 'condition_range',
@@ -62,11 +131,12 @@ def get_salary_rules(models, db, uid, password, structure_id=None):
         'amount_select', 'amount_fix', 'amount_percentage',
         'amount_python_compute', 'amount_percentage_base',
         'quantity', 'appears_on_payslip', 'active',
-        'note', 'struct_id', 'company_id'
+        'note', 'struct_id'
     ]
 
     domain = []
     if structure_id:
+        # Buscar reglas que pertenezcan a la estructura especificada
         domain = [('struct_id', '=', structure_id)]
 
     try:
@@ -158,14 +228,20 @@ def create_field_element(parent, field_name, value, **attrs):
     return field
 
 
-def create_xml_output(rules, categories, structures, models, db, uid, password, 
-                     generate_xmlids=True, module_prefix='l10n_do_hr_payroll'):
+def create_xml_output(rules, categories, structures, models, db, uid, password,
+                     generate_xmlids=True, module_prefix='l10n_do_hr_payroll',
+                     rule_parameters=None, parameter_values=None, inputs=None):
     """Generate Odoo-compatible XML data file with proper XML IDs and all fields."""
-    
+
+    rule_parameters = rule_parameters or []
+    parameter_values = parameter_values or []
+    inputs = inputs or []
+
     # Mapa de XML IDs para referencias
     category_xmlids = {}
     structure_xmlids = {}
     rule_xmlids = {}
+    parameter_xmlids = {}
     
     # Obtener XML IDs existentes si es posible
     if generate_xmlids:
@@ -194,7 +270,16 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
             else:
                 xml_id = sanitize_xml_id(rule['name'], rule['code'])
                 rule_xmlids[rule['id']] = f"{module_prefix}.aginc_hr_salary_rule_{xml_id}"
-    
+
+        # Obtener XML IDs para parámetros
+        for param in rule_parameters:
+            ext_id = get_external_id(models, db, uid, password, 'hr.rule.parameter', param['id'])
+            if ext_id:
+                parameter_xmlids[param['id']] = ext_id
+            else:
+                xml_id = sanitize_xml_id(param['name'], param.get('code'))
+                parameter_xmlids[param['id']] = f"{module_prefix}.aginc_rule_parameter_{xml_id}"
+
     # Create root element
     root = ET.Element('odoo')
     
@@ -236,7 +321,7 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
                     'ref': ref_id
                 })
         
-        # Campo: struct_id (con ref)
+        # Campo: struct_id (con ref) - para compatibilidad con versiones anteriores
         if rule.get('struct_id'):
             struct_id = rule['struct_id'][0]
             if struct_id in structure_xmlids:
@@ -247,13 +332,13 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
                     ref_id = sanitize_xml_id(struct['name'], struct.get('code'), module_prefix)
                 else:
                     ref_id = None
-            
+
             if ref_id:
                 ET.SubElement(record, 'field', {
                     'name': 'struct_id',
                     'ref': ref_id
                 })
-        
+
         # Campo: code
         if rule.get('code'):
             create_field_element(record, 'code', rule['code'])
@@ -320,7 +405,133 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
         if rule.get('note'):
             field = ET.SubElement(record, 'field', {'name': 'note'})
             field.text = escape_xml_content(rule['note'])
-    
+
+    # =====================================================================
+    # Agregar sección de Rule Parameters con sus Values (formato Odoo 18)
+    # Cada parámetro seguido inmediatamente de sus valores
+    # =====================================================================
+    if rule_parameters:
+        comment = ET.Comment(' Parámetros de Reglas Salariales (hr.rule.parameter) con sus valores ')
+        root.append(comment)
+
+        # Crear un diccionario de valores agrupados por parameter_id
+        values_by_param = {}
+        for pval in parameter_values:
+            param_id = pval.get('rule_parameter_id')
+            if param_id and isinstance(param_id, list):
+                param_db_id = param_id[0]
+            else:
+                param_db_id = param_id
+
+            if param_db_id not in values_by_param:
+                values_by_param[param_db_id] = []
+            values_by_param[param_db_id].append(pval)
+
+        for param in rule_parameters:
+            # Determinar el XML ID para este parámetro
+            if generate_xmlids and param['id'] in parameter_xmlids:
+                record_xmlid = parameter_xmlids[param['id']].split('.')[-1]
+            else:
+                record_xmlid = sanitize_xml_id(param['name'], param.get('code'), 'aginc_rule_parameter')
+
+            # Agregar comentario con el código del parámetro
+            if param.get('code'):
+                param_comment = ET.Comment(f" {param['code']} ")
+                root.append(param_comment)
+
+            # Crear el registro del parámetro
+            record = ET.SubElement(root, 'record', {
+                'id': record_xmlid,
+                'model': 'hr.rule.parameter'
+            })
+
+            # Campo: name
+            create_field_element(record, 'name', param['name'])
+
+            # Campo: code
+            if param.get('code'):
+                create_field_element(record, 'code', param['code'])
+
+            # Campo: description (sin country_id según Odoo 18)
+            if param.get('description'):
+                field = ET.SubElement(record, 'field', {'name': 'description'})
+                field.text = escape_xml_content(param['description'])
+
+            # Agregar los valores de este parámetro inmediatamente después
+            param_values = values_by_param.get(param['id'], [])
+            for idx, pval in enumerate(param_values):
+                # Generar XML ID para el valor (formato: aginc_rule_parameter_value_{code})
+                value_xmlid = record_xmlid.replace('aginc_rule_parameter_', 'aginc_rule_parameter_value_')
+                # Si hay múltiples valores, agregar sufijo de fecha
+                if len(param_values) > 1:
+                    date_suffix = str(pval.get('date_from', '')).replace('-', '_')
+                    value_xmlid = f"{value_xmlid}_{date_suffix}" if date_suffix else f"{value_xmlid}_{idx}"
+
+                value_record = ET.SubElement(root, 'record', {
+                    'id': value_xmlid,
+                    'model': 'hr.rule.parameter.value'
+                })
+
+                # Campo: rule_parameter_id (referencia al parámetro padre)
+                ET.SubElement(value_record, 'field', {
+                    'name': 'rule_parameter_id',
+                    'ref': record_xmlid
+                })
+
+                # Campo: date_from
+                if pval.get('date_from'):
+                    create_field_element(value_record, 'date_from', pval['date_from'])
+
+                # Campo: parameter_value
+                if pval.get('parameter_value') is not None:
+                    create_field_element(value_record, 'parameter_value', pval['parameter_value'])
+
+    # =====================================================================
+    # Agregar sección de Inputs (hr.payslip.input.type)
+    # =====================================================================
+    if inputs:
+        comment = ET.Comment(' Tipos de Inputs para Nómina (hr.payslip.input.type) ')
+        root.append(comment)
+
+        for inp in inputs:
+            # Obtener XML ID existente o generar uno nuevo
+            ext_id = get_external_id(models, db, uid, password, 'hr.payslip.input.type', inp['id'])
+            if ext_id:
+                record_xmlid = ext_id.split('.')[-1]
+            else:
+                record_xmlid = sanitize_xml_id(inp['name'], inp.get('code'), 'aginc_payslip_input_type')
+
+            record = ET.SubElement(root, 'record', {
+                'id': record_xmlid,
+                'model': 'hr.payslip.input.type'
+            })
+
+            # Campo: name
+            create_field_element(record, 'name', inp['name'])
+
+            # Campo: code
+            if inp.get('code'):
+                create_field_element(record, 'code', inp['code'])
+
+            # Campo: struct_ids (many2many) - usando eval
+            if inp.get('struct_ids'):
+                struct_refs = []
+                for struct_id in inp['struct_ids']:
+                    if struct_id in structure_xmlids:
+                        struct_refs.append(f"ref('{structure_xmlids[struct_id]}')")
+                    else:
+                        struct = structures.get(struct_id)
+                        if struct:
+                            generated_id = sanitize_xml_id(struct['name'], struct.get('code'), f'{module_prefix}.aginc_structure')
+                            struct_refs.append(f"ref('{generated_id}')")
+
+                if struct_refs:
+                    refs_str = ', '.join(struct_refs)
+                    ET.SubElement(record, 'field', {
+                        'name': 'struct_ids',
+                        'eval': f"[(6, 0, [{refs_str}])]"
+                    })
+
     return root
 
 
@@ -425,7 +636,7 @@ def main():
         print(f"Filtering by structure: {selected_structure['name']} (ID: {args.structure_id})")
 
     print("Fetching salary rules...")
-    rules = get_salary_rules(models, args.db, uid, args.password, 
+    rules = get_salary_rules(models, args.db, uid, args.password,
                             structure_id=args.structure_id)
     print(f"Found {len(rules)} rules")
 
@@ -433,11 +644,30 @@ def main():
         print("No rules found for the specified criteria.")
         sys.exit(0)
 
+    # Obtener parámetros de reglas
+    print("Fetching rule parameters...")
+    rule_parameters = get_rule_parameters(models, args.db, uid, args.password)
+    print(f"Found {len(rule_parameters)} rule parameters")
+
+    # Obtener valores de parámetros
+    print("Fetching parameter values...")
+    parameter_ids = [p['id'] for p in rule_parameters] if rule_parameters else None
+    parameter_values = get_rule_parameter_values(models, args.db, uid, args.password, parameter_ids)
+    print(f"Found {len(parameter_values)} parameter values")
+
+    # Obtener inputs
+    print("Fetching salary rule inputs...")
+    inputs = get_salary_rule_inputs(models, args.db, uid, args.password)
+    print(f"Found {len(inputs)} inputs")
+
     print("Generating XML with complete fields and proper references...")
     xml_root = create_xml_output(
         rules, categories, structures, models, args.db, uid, args.password,
         generate_xmlids=not args.no_xmlid_lookup,
-        module_prefix=args.module_prefix
+        module_prefix=args.module_prefix,
+        rule_parameters=rule_parameters,
+        parameter_values=parameter_values,
+        inputs=inputs
     )
     
     xml_string = prettify_xml(xml_root)
@@ -460,6 +690,9 @@ def main():
 
     print(f"\n✓ XML exported successfully to: {output_file}")
     print(f"✓ Total rules exported: {len(rules)}")
+    print(f"✓ Total rule parameters exported: {len(rule_parameters)}")
+    print(f"✓ Total parameter values exported: {len(parameter_values)}")
+    print(f"✓ Total inputs exported: {len(inputs)}")
     print(f"✓ All fields included with proper XML ID references")
 
 
