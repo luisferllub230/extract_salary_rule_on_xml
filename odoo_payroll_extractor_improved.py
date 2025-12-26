@@ -203,19 +203,10 @@ def sanitize_xml_id(name, code=None, prefix=''):
 
 
 def escape_xml_content(text):
-    """Properly escape text for XML content, handling CDATA when needed."""
+    """Return text as-is for XML content. ElementTree handles escaping automatically."""
     if not text:
         return ""
-    
-    text = str(text)
-    
-    # Si el texto contiene caracteres especiales de XML, usar CDATA
-    if any(char in text for char in ['<', '>', '&']) and not text.strip().startswith('<![CDATA['):
-        # Verificar si ya tiene CDATA
-        if '<![CDATA[' not in text:
-            return f"<![CDATA[{text}]]>"
-    
-    return text
+    return str(text)
 
 
 def create_field_element(parent, field_name, value, **attrs):
