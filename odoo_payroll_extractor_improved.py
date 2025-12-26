@@ -166,7 +166,8 @@ def get_salary_rules(models, db, uid, password, structure_id=None):
 
 
 def get_external_id(models, db, uid, password, model, record_id):
-    """Get external ID (XML ID) for a record if it exists."""
+    """Get external ID (XML ID) for a record if it exists.
+    Returns the complete XML ID with module prefix (e.g., module.name)."""
     try:
         ir_model_data = models.execute_kw(
             db, uid, password,
@@ -175,7 +176,10 @@ def get_external_id(models, db, uid, password, model, record_id):
             {'fields': ['module', 'name'], 'limit': 1}
         )
         if ir_model_data:
-            return f"{ir_model_data[0]['module']}.{ir_model_data[0]['name']}"
+            # Devolver el ID completo con el módulo: module.name
+            module = ir_model_data[0]['module']
+            name = ir_model_data[0]['name']
+            return f"{module}.{name}"
         return None
     except:
         return None
@@ -251,25 +255,25 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
             if ext_id:
                 category_xmlids[cat_id] = ext_id
             else:
-                # Generar uno nuevo
+                # Generar uno nuevo (sin prefijo de módulo)
                 xml_id = sanitize_xml_id(cat['name'], cat['code'])
-                category_xmlids[cat_id] = f"{module_prefix}.aginc_{xml_id.upper()}"
-        
+                category_xmlids[cat_id] = f"aginc_{xml_id.upper()}"
+
         for struct_id, struct in structures.items():
             ext_id = get_external_id(models, db, uid, password, 'hr.payroll.structure', struct_id)
             if ext_id:
                 structure_xmlids[struct_id] = ext_id
             else:
                 xml_id = sanitize_xml_id(struct['name'], struct.get('code'))
-                structure_xmlids[struct_id] = f"{module_prefix}.aginc_structure_{xml_id}"
-        
+                structure_xmlids[struct_id] = f"aginc_structure_{xml_id}"
+
         for rule in rules:
             ext_id = get_external_id(models, db, uid, password, 'hr.salary.rule', rule['id'])
             if ext_id:
                 rule_xmlids[rule['id']] = ext_id
             else:
                 xml_id = sanitize_xml_id(rule['name'], rule['code'])
-                rule_xmlids[rule['id']] = f"{module_prefix}.aginc_hr_salary_rule_{xml_id}"
+                rule_xmlids[rule['id']] = f"aginc_hr_salary_rule_{xml_id}"
 
         # Obtener XML IDs para parámetros
         for param in rule_parameters:
@@ -278,7 +282,7 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
                 parameter_xmlids[param['id']] = ext_id
             else:
                 xml_id = sanitize_xml_id(param['name'], param.get('code'))
-                parameter_xmlids[param['id']] = f"{module_prefix}.aginc_rule_parameter_{xml_id}"
+                parameter_xmlids[param['id']] = f"aginc_rule_parameter_{xml_id}"
 
     # Create root element
     root = ET.Element('odoo')
@@ -291,7 +295,7 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
     for rule in rules:
         # Determinar el XML ID para este registro
         if generate_xmlids and rule['id'] in rule_xmlids:
-            record_xmlid = rule_xmlids[rule['id']].split('.')[-1]  # Solo la parte después del módulo
+            record_xmlid = rule_xmlids[rule['id']]
         else:
             record_xmlid = sanitize_xml_id(rule['name'], rule['code'], 'aginc_hr_salary_rule')
         
@@ -329,7 +333,7 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
             else:
                 struct = structures.get(struct_id)
                 if struct:
-                    ref_id = sanitize_xml_id(struct['name'], struct.get('code'), module_prefix)
+                    ref_id = sanitize_xml_id(struct['name'], struct.get('code'), 'aginc_structure')
                 else:
                     ref_id = None
 
@@ -430,7 +434,7 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
         for param in rule_parameters:
             # Determinar el XML ID para este parámetro
             if generate_xmlids and param['id'] in parameter_xmlids:
-                record_xmlid = parameter_xmlids[param['id']].split('.')[-1]
+                record_xmlid = parameter_xmlids[param['id']]
             else:
                 record_xmlid = sanitize_xml_id(param['name'], param.get('code'), 'aginc_rule_parameter')
 
@@ -497,7 +501,7 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
             # Obtener XML ID existente o generar uno nuevo
             ext_id = get_external_id(models, db, uid, password, 'hr.payslip.input.type', inp['id'])
             if ext_id:
-                record_xmlid = ext_id.split('.')[-1]
+                record_xmlid = ext_id
             else:
                 record_xmlid = sanitize_xml_id(inp['name'], inp.get('code'), 'aginc_payslip_input_type')
 
@@ -522,7 +526,7 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
                     else:
                         struct = structures.get(struct_id)
                         if struct:
-                            generated_id = sanitize_xml_id(struct['name'], struct.get('code'), f'{module_prefix}.aginc_structure')
+                            generated_id = sanitize_xml_id(struct['name'], struct.get('code'), 'aginc_structure')
                             struct_refs.append(f"ref('{generated_id}')")
 
                 if struct_refs:
