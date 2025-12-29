@@ -10,6 +10,8 @@ from xml.dom import minidom
 import argparse
 import sys
 import re
+import logging
+from datetime import datetime
 
 
 def connect_odoo(url, db, username, password):
@@ -225,8 +227,18 @@ def create_field_element(parent, field_name, value, **attrs):
 
 def create_xml_output(rules, categories, structures, models, db, uid, password,
                      generate_xmlids=True, module_prefix='l10n_do_hr_payroll',
-                     rule_parameters=None, parameter_values=None, inputs=None):
-    """Generate Odoo-compatible XML data file with proper XML IDs and all fields."""
+                     rule_parameters=None, parameter_values=None, inputs=None,
+                     include_without_xmlid=False):
+    """Generate Odoo-compatible XML data file with proper XML IDs and all fields.
+
+    Args:
+        include_without_xmlid: If True, includes rules without xmlid (generates automatic xmlid).
+                              If False (default), skips rules without xmlid to avoid duplicates.
+
+    Returns:
+        tuple: (xml_root, skipped_rules) where skipped_rules is a list of rules
+               that were omitted due to missing xmlid.
+    """
 
     rule_parameters = rule_parameters or []
     parameter_values = parameter_values or []
@@ -237,7 +249,10 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
     structure_xmlids = {}
     rule_xmlids = {}
     parameter_xmlids = {}
-    
+
+    # Lista de reglas omitidas (sin xmlid)
+    skipped_rules = []
+
     # Obtener XML IDs existentes si es posible
     if generate_xmlids:
         print("Fetching existing XML IDs...")
@@ -263,8 +278,30 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
             if ext_id:
                 rule_xmlids[rule['id']] = ext_id
             else:
-                xml_id = sanitize_xml_id(rule['name'], rule['code'])
-                rule_xmlids[rule['id']] = f"aginc_hr_salary_rule_{xml_id}"
+                # Regla sin xmlid
+                if include_without_xmlid:
+                    # Generar xmlid automatico e incluir la regla
+                    xml_id = sanitize_xml_id(rule['name'], rule['code'])
+                    rule_xmlids[rule['id']] = f"aginc_hr_salary_rule_{xml_id}"
+                    logging.info(
+                        f"Regla sin xmlid incluida con ID generado - ID: {rule['id']}, "
+                        f"Nombre: {rule.get('name', 'N/A')}, "
+                        f"Codigo: {rule.get('code', 'N/A')}, "
+                        f"xmlid generado: aginc_hr_salary_rule_{xml_id}"
+                    )
+                else:
+                    # Omitir la regla
+                    skipped_rules.append({
+                        'id': rule['id'],
+                        'name': rule.get('name', 'N/A'),
+                        'code': rule.get('code', 'N/A'),
+                        'reason': 'No xmlid found in ir.model.data'
+                    })
+                    logging.warning(
+                        f"Regla omitida - ID: {rule['id']}, "
+                        f"Nombre: {rule.get('name', 'N/A')}, "
+                        f"Codigo: {rule.get('code', 'N/A')} - Sin xmlid"
+                    )
 
         # Obtener XML IDs para parámetros
         for param in rule_parameters:
@@ -282,14 +319,21 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
     comment = ET.Comment(' Reglas salariales para la estructura de Nomina Regular (Quincenal y con retenciones en ambas quincenas) ')
     root.append(comment)
     
+    # IDs de reglas omitidas para filtrado rápido
+    skipped_rule_ids = {r['id'] for r in skipped_rules}
+
     # Add salary rules
     for rule in rules:
+        # Omitir reglas sin xmlid cuando generate_xmlids está activo
+        if generate_xmlids and rule['id'] in skipped_rule_ids:
+            continue
+
         # Determinar el XML ID para este registro
         if generate_xmlids and rule['id'] in rule_xmlids:
             record_xmlid = rule_xmlids[rule['id']]
         else:
             record_xmlid = sanitize_xml_id(rule['name'], rule['code'], 'aginc_hr_salary_rule')
-        
+
         record = ET.SubElement(root, 'record', {
             'id': record_xmlid,
             'model': 'hr.salary.rule'
@@ -527,7 +571,7 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
                         'eval': f"[(6, 0, [{refs_str}])]"
                     })
 
-    return root
+    return root, skipped_rules
 
 
 def prettify_xml(elem):
@@ -577,27 +621,49 @@ def list_structures(models, db, uid, password):
     print(f"Total: {len(structures)} structures")
 
 
+def setup_logging(log_file=None):
+    """Configure logging to file and console."""
+    log_filename = log_file or f"payroll_extractor_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_filename, encoding='utf-8'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    return log_filename
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Extract payroll rules from Odoo 18 to XML with complete fields and proper references'
     )
-    parser.add_argument('--url', required=True, 
+    parser.add_argument('--url', required=True,
                        help='Odoo server URL (e.g., http://localhost:8069)')
     parser.add_argument('--db', required=True, help='Database name')
     parser.add_argument('--user', required=True, help='Username')
     parser.add_argument('--password', required=True, help='Password or API key')
-    parser.add_argument('--output', default=None, 
+    parser.add_argument('--output', default=None,
                        help='Output XML file (auto-generated from structure name if not specified)')
-    parser.add_argument('--list-structures', action='store_true', 
+    parser.add_argument('--list-structures', action='store_true',
                        help='List all available payroll structures and exit')
-    parser.add_argument('--structure-id', type=int, 
+    parser.add_argument('--structure-id', type=int,
                        help='Extract rules only for the specified structure ID')
     parser.add_argument('--module-prefix', default='l10n_do_hr_payroll',
                        help='Module prefix for XML IDs (default: l10n_do_hr_payroll)')
     parser.add_argument('--no-xmlid-lookup', action='store_true',
                        help='Skip looking up existing XML IDs (faster but may generate inconsistent IDs)')
+    parser.add_argument('--include-without-xmlid', action='store_true',
+                       help='Include rules without xmlid (generates automatic xmlid). Default: skip rules without xmlid')
+    parser.add_argument('--log-file', default=None,
+                       help='Log file path (auto-generated if not specified)')
 
     args = parser.parse_args()
+
+    # Configure logging
+    log_filename = setup_logging(args.log_file)
 
     print(f"Connecting to Odoo at {args.url}...")
     try:
@@ -656,18 +722,19 @@ def main():
     print(f"Found {len(inputs)} inputs")
 
     print("Generating XML with complete fields and proper references...")
-    xml_root = create_xml_output(
+    xml_root, skipped_rules = create_xml_output(
         rules, categories, structures, models, args.db, uid, args.password,
         generate_xmlids=not args.no_xmlid_lookup,
         module_prefix=args.module_prefix,
         rule_parameters=rule_parameters,
         parameter_values=parameter_values,
-        inputs=inputs
+        inputs=inputs,
+        include_without_xmlid=args.include_without_xmlid
     )
-    
+
     xml_string = prettify_xml(xml_root)
-    
-    # Asegurar declaración XML correcta
+
+    # Asegurar declaracion XML correcta
     if not xml_string.startswith('<?xml'):
         xml_string = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml_string
 
@@ -683,12 +750,36 @@ def main():
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(xml_string)
 
-    print(f"\n✓ XML exported successfully to: {output_file}")
-    print(f"✓ Total rules exported: {len(rules)}")
-    print(f"✓ Total rule parameters exported: {len(rule_parameters)}")
-    print(f"✓ Total parameter values exported: {len(parameter_values)}")
-    print(f"✓ Total inputs exported: {len(inputs)}")
-    print(f"✓ All fields included with proper XML ID references")
+    # Calcular reglas exportadas (total - omitidas)
+    exported_rules_count = len(rules) - len(skipped_rules)
+
+    print(f"\n{'='*70}")
+    print("RESULTADO DE LA EXTRACCION")
+    print(f"{'='*70}")
+    print(f"XML exportado a: {output_file}")
+    print(f"Total reglas encontradas: {len(rules)}")
+    print(f"Reglas exportadas: {exported_rules_count}")
+    print(f"Reglas omitidas (sin xmlid): {len(skipped_rules)}")
+    print(f"Parametros de reglas exportados: {len(rule_parameters)}")
+    print(f"Valores de parametros exportados: {len(parameter_values)}")
+    print(f"Inputs exportados: {len(inputs)}")
+
+    # Mostrar detalle de reglas omitidas
+    if skipped_rules:
+        print(f"\n{'='*70}")
+        print("REGLAS OMITIDAS (SIN XMLID)")
+        print(f"{'='*70}")
+        print(f"{'ID':<8} {'Codigo':<20} {'Nombre'}")
+        print(f"{'-'*70}")
+        for rule in skipped_rules:
+            print(f"{rule['id']:<8} {rule['code']:<20} {rule['name']}")
+        print(f"{'-'*70}")
+        print(f"ADVERTENCIA: {len(skipped_rules)} regla(s) fueron omitidas por no tener xmlid.")
+        print(f"Estas reglas no fueron incluidas en el XML para evitar duplicados.")
+        logging.info(f"Total reglas omitidas: {len(skipped_rules)}")
+
+    print(f"\nLog guardado en: {log_filename}")
+    print(f"{'='*70}")
 
 
 if __name__ == '__main__':
