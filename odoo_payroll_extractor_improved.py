@@ -312,6 +312,13 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
                 xml_id = sanitize_xml_id(param['name'], param.get('code'))
                 parameter_xmlids[param['id']] = f"aginc_rule_parameter_{xml_id}"
 
+        # Obtener XML IDs para valores de parámetros
+        parameter_value_xmlids = {}
+        for pval in parameter_values:
+            ext_id = get_external_id(models, db, uid, password, 'hr.rule.parameter.value', pval['id'])
+            if ext_id:
+                parameter_value_xmlids[pval['id']] = ext_id
+
     # Create root element
     root = ET.Element('odoo')
     
@@ -499,12 +506,17 @@ def create_xml_output(rules, categories, structures, models, db, uid, password,
             # Agregar los valores de este parámetro inmediatamente después
             param_values = values_by_param.get(param['id'], [])
             for idx, pval in enumerate(param_values):
-                # Generar XML ID para el valor (formato: aginc_rule_parameter_value_{code})
-                value_xmlid = record_xmlid.replace('aginc_rule_parameter_', 'aginc_rule_parameter_value_')
-                # Si hay múltiples valores, agregar sufijo de fecha
-                if len(param_values) > 1:
-                    date_suffix = str(pval.get('date_from', '')).replace('-', '_')
-                    value_xmlid = f"{value_xmlid}_{date_suffix}" if date_suffix else f"{value_xmlid}_{idx}"
+                # Primero verificar si ya existe un XML ID para este valor
+                if generate_xmlids and pval['id'] in parameter_value_xmlids:
+                    # Usar el XML ID existente (no modificar)
+                    value_xmlid = parameter_value_xmlids[pval['id']]
+                else:
+                    # Generar XML ID para el valor (formato: aginc_rule_parameter_value_{code})
+                    value_xmlid = record_xmlid.replace('aginc_rule_parameter_', 'aginc_rule_parameter_value_')
+                    # Si hay múltiples valores, agregar sufijo de fecha
+                    if len(param_values) > 1:
+                        date_suffix = str(pval.get('date_from', '')).replace('-', '_')
+                        value_xmlid = f"{value_xmlid}_{date_suffix}" if date_suffix else f"{value_xmlid}_{idx}"
 
                 value_record = ET.SubElement(root, 'record', {
                     'id': value_xmlid,
